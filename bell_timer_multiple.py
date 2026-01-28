@@ -10,11 +10,11 @@ import threading
 import time
 import json
 from datetime import datetime
-from gpiozero import Buzzer
 from PIL import Image
 import re
 import argparse
 import os
+from play_bell_sound import play_bell_sound
 
 class OCRBellTimerMultiple:
     def __init__(self, target_times, gpio_pin=17, camera_index=0):
@@ -23,13 +23,10 @@ class OCRBellTimerMultiple:
         
         Args:
             target_times (list): List of times in HH:MM format
-            gpio_pin (int): GPIO pin number for the buzzer
             camera_index (int): Camera device index (0 for default)
         """
         self.target_times = target_times
-        self.gpio_pin = gpio_pin
         self.camera_index = camera_index
-        self.buzzer = Buzzer(gpio_pin)
         self.running = True
         self.triggered_times = set()  # Track which times have already triggered
         
@@ -42,107 +39,125 @@ class OCRBellTimerMultiple:
     
     def extract_time_from_image(self, image):
         """
-        Extract time digits from camera image using OCR
-        
+        Extract time digits from camera image using OCR, focusing on red digits and cropping to clock face.
+        Tries multiple Tesseract PSM modes and allows for tighter cropping.
         Args:
             image: OpenCV image frame
-            
         Returns:
             str: Extracted time string in HH:MM format or None
         """
         try:
-            # Preprocess image for better OCR
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            
-            # Apply thresholding
-            _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-            
-            # Upscale for better OCR accuracy
+            # --- Step 1: Crop to clock face area (tighter crop) ---
+            h, w, _ = image.shape
+            # Try a tighter crop (adjust these as needed)
+            crop_x1 = int(w * 0.28)
+            crop_x2 = int(w * 0.72)
+            crop_y1 = int(h * 0.36)
+            crop_y2 = int(h * 0.64)
+            cropped = image[crop_y1:crop_y2, crop_x1:crop_x2]
+
+            # --- Step 2: Isolate red digits ---
+            hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)
+            lower_red1 = (0, 70, 50)
+            upper_red1 = (10, 255, 255)
+            lower_red2 = (170, 70, 50)
+            upper_red2 = (180, 255, 255)
+            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            mask = cv2.bitwise_or(mask1, mask2)
+            red_digits = cv2.bitwise_and(cropped, cropped, mask=mask)
+
+            # --- Step 3: Convert to grayscale and enhance ---
+            gray = cv2.cvtColor(red_digits, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            gray = cv2.fastNlMeansDenoising(gray, None, 30, 7, 21)
+            gray = cv2.bitwise_not(gray)
+            _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY)
+
+            # --- Step 4: Upscale for better OCR accuracy ---
             height, width = thresh.shape
             thresh = cv2.resize(thresh, (width * 2, height * 2), interpolation=cv2.INTER_CUBIC)
-            
-            # Apply morphological operations to clean up
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-            
-            # Perform OCR
-            text = pytesseract.image_to_string(thresh, config='--psm 6 -c tessedit_char_whitelist=0123456789:')
-            
-            # Extract only the time portion (HH:MM)
+
+            # --- Step 5: Try multiple Tesseract PSM modes ---
+            configs = [
+                '--psm 13 -c tessedit_char_whitelist=0123456789:',
+                '--psm 6 -c tessedit_char_whitelist=0123456789:',
+                '--psm 7 -c tessedit_char_whitelist=0123456789:'
+            ]
             time_pattern = r'\d{1,2}:\d{2}'
-            match = re.search(time_pattern, text)
-            
-            if match:
-                return match.group(0)
-            
+            for config in configs:
+                text = pytesseract.image_to_string(thresh, config=config)
+                match = re.search(time_pattern, text)
+                if match:
+                    return match.group(0)
             return None
         except Exception as e:
             print(f"Error extracting time from image: {e}")
             return None
     
-    def ring_bell(self, trigger_time, duration=3):
+    def ring_bell(self, trigger_time, duration=3, sound_file="bell.wav"):
         """
-        Ring the buzzer/bell
+        Ring the buzzer/bell and play a sound file
         
         Args:
             trigger_time (str): The time that triggered the bell
             duration (int): Duration in seconds
+            sound_file (str): Path to bell sound file (wav or mp3)
         """
         print(f"\n🔔 BELL RINGING! Time reached: {trigger_time}")
-        self.buzzer.on()
+        # Play sound in a separate thread so it doesn't block
+        threading.Thread(target=play_bell_sound, args=(sound_file,), daemon=True).start()
         time.sleep(duration)
-        self.buzzer.off()
         print("Bell stopped.\n")
     
     def process_camera_feed(self):
         """
-        Continuously process camera feed and check for all target times
+        Continuously process camera feed and check for all target times, without opening a camera preview window.
+        Only prints when an image is read and what text was found.
         """
         cap = cv2.VideoCapture(self.camera_index)
-        
         if not cap.isOpened():
             print(f"Error: Cannot open camera {self.camera_index}")
             return
-        
         print(f"Camera opened successfully. Watching for times: {', '.join(self.target_times)}")
-        print("Press 'q' to quit...\n")
-        
-        frame_count = 0
-        check_frequency = 5  # Check OCR every N frames to save resources
-        
+        print("Press Ctrl+C to quit...\n")
+
         try:
             while self.running:
                 ret, frame = cap.read()
-                
                 if not ret:
                     print("Error reading frame")
                     break
-                
-                # Display the frame
-                cv2.imshow('OCR Bell Timer', frame)
-                
-                # Process every Nth frame for OCR
-                frame_count += 1
-                if frame_count % check_frequency == 0:
-                    recognized_time = self.extract_time_from_image(frame)
-                    
-                    if recognized_time:
-                        print(f"Recognized time: {recognized_time}", end='\r')
-                        
-                        # Check if time matches any target
-                        if recognized_time in self.target_times and recognized_time not in self.triggered_times:
-                            self.triggered_times.add(recognized_time)
-                            # Ring bell in separate thread to not block camera processing
-                            bell_thread = threading.Thread(target=self.ring_bell, args=(recognized_time, 3))
-                            bell_thread.start()
-                
-                # Exit on 'q' key press
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-        
+
+                # Save the frame as an image file
+                image_path = "temp_capture.jpg"
+                cv2.imwrite(image_path, frame)
+
+                # Read the image back and process OCR
+                image = cv2.imread(image_path)
+                recognized_time = self.extract_time_from_image(image)
+                print(f"[Image read] OCR detected: {recognized_time}")
+                if recognized_time:
+                    if recognized_time in self.target_times and recognized_time not in self.triggered_times:
+                        print(f"Target time matched: {recognized_time}")
+                        self.triggered_times.add(recognized_time)
+                        bell_thread = threading.Thread(target=self.ring_bell, args=(recognized_time, 3))
+                        bell_thread.start()
+
+                # Delete the image file
+                try:
+                    os.remove(image_path)
+                except Exception as e:
+                    print(f"Warning: Could not delete temp image: {e}")
+
+                # Wait 1 second before next capture
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nExiting on user request.")
         finally:
             cap.release()
-            cv2.destroyAllWindows()
             self.running = False
     
     def process_image_file(self, image_path):
