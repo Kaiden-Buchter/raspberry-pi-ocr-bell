@@ -126,19 +126,20 @@ class OCRBellTimerMultiple:
 
         try:
             while self.running:
+                print("[Camera] Taking photo...")
                 ret, frame = cap.read()
                 if not ret:
                     print("Error reading frame")
                     break
 
-                # Save the frame as an image file
                 image_path = "temp_capture.jpg"
                 cv2.imwrite(image_path, frame)
+                print(f"[Camera] Photo saved as {image_path}")
 
-                # Read the image back and process OCR
                 image = cv2.imread(image_path)
+                print("[OCR] Processing image...")
                 recognized_time = self.extract_time_from_image(image)
-                print(f"[Image read] OCR detected: {recognized_time}")
+                print(f"[OCR] Detected: {recognized_time}")
                 if recognized_time:
                     if recognized_time in self.target_times and recognized_time not in self.triggered_times:
                         print(f"Target time matched: {recognized_time}")
@@ -146,13 +147,12 @@ class OCRBellTimerMultiple:
                         bell_thread = threading.Thread(target=self.ring_bell, args=(recognized_time, 3))
                         bell_thread.start()
 
-                # Delete the image file
                 try:
                     os.remove(image_path)
+                    print(f"[Cleanup] Deleted {image_path}")
                 except Exception as e:
                     print(f"Warning: Could not delete temp image: {e}")
 
-                # Wait 1 second before next capture
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\nExiting on user request.")
