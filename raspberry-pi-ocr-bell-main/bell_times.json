@@ -1,0 +1,10 @@
+{
+  "times": [
+    "09:00",
+    "12:30",
+    "14:30",
+    "16:45",
+    "18:00"
+  ],
+  "description": "Bell times for the day. Format: HH:MM (24-hour)"
+}
